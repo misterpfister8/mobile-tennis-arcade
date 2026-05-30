@@ -1,0 +1,10 @@
+{
+  "name": "Neon Rally Tennis",
+  "short_name": "Neon Tennis",
+  "start_url": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#080a1a",
+  "theme_color": "#080a1a",
+  "icons": []
+}
