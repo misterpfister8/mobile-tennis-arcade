@@ -42,6 +42,7 @@ let rally = 0;
 let combo = 1;
 let highScore = Number(localStorage.getItem("neon-rally-highscore") || 0);
 let shake = 0;
+let shakePhase = 0;
 let flash = 0;
 let spawnTimer = 4;
 let slowTimer = 0;
@@ -55,6 +56,7 @@ let lastTap = 0;
 const player = { x: BASE_W / 2, y: BASE_H * PLAYER_Y, w: 86, h: 16, targetX: BASE_W / 2 };
 const ai = { x: BASE_W / 2, y: BASE_H * AI_Y, w: 92, h: 13 };
 const ball = { x: BASE_W / 2, y: BASE_H * 0.62, vx: 92, vy: -410, r: 8, spin: 0, fire: 0 };
+const ballTrail: Array<Vec & { life: number; max: number; radius: number }> = [];
 const particles: Particle[] = [];
 const popups: Popup[] = [];
 const powerups: Powerup[] = [];
@@ -102,6 +104,8 @@ function resize() {
   canvas.width = Math.max(1, Math.floor(rect.width * dpr));
   canvas.height = Math.max(1, Math.floor(rect.height * dpr));
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   width = rect.width;
   height = rect.height;
   scale = Math.min(width / BASE_W, height / BASE_H);
@@ -126,6 +130,7 @@ function reset(startPlaying = true) {
   fireTimer = 0;
   smashQueued = false;
   powerups.length = 0;
+  ballTrail.length = 0;
   particles.length = 0;
   popups.length = 0;
   player.x = width / 2;
@@ -217,14 +222,16 @@ function update(rawDt: number) {
 
   player.w = 86 * scale + (bigTimer > 0 ? 42 * scale : 0);
   player.targetX = clamp(player.targetX, 34 * scale, width - 34 * scale);
-  player.x += (player.targetX - player.x) * Math.min(1, 16 * dt);
+  player.x += (player.targetX - player.x) * (1 - Math.exp(-24 * dt));
   player.x = clamp(player.x, player.w / 2 + 12 * scale, width - player.w / 2 - 12 * scale);
 
   const aiDifficulty = clamp(0.64 + rally * 0.012, 0.64, 0.94);
   const predictedX = clamp(ball.x + ball.vx * 0.12, ai.w / 2 + 12 * scale, width - ai.w / 2 - 12 * scale);
-  ai.x += (predictedX - ai.x) * aiDifficulty * 5.8 * dt;
+  ai.x += (predictedX - ai.x) * (1 - Math.exp(-aiDifficulty * 7.2 * dt));
 
   ball.vx += ball.spin * gameDt * 6.5;
+  ballTrail.push({ x: ball.x, y: ball.y, life: 0.18, max: 0.18, radius: ball.r });
+  if (ballTrail.length > 12) ballTrail.shift();
   ball.x += ball.vx * gameDt;
   ball.y += ball.vy * gameDt;
   ball.spin *= 0.994;
@@ -333,8 +340,13 @@ function updatePowerups(dt: number) {
 }
 
 function updateEffects(dt: number) {
+  shakePhase += dt * 42;
   shake = Math.max(0, shake - dt * 28 * scale);
   flash = Math.max(0, flash - dt);
+  for (let i = ballTrail.length - 1; i >= 0; i -= 1) {
+    ballTrail[i].life -= dt;
+    if (ballTrail[i].life <= 0) ballTrail.splice(i, 1);
+  }
   for (let i = particles.length - 1; i >= 0; i -= 1) {
     const p = particles[i];
     p.life -= dt;
@@ -373,14 +385,15 @@ function addPopup(x: number, y: number, text: string, color: string) {
 }
 
 function draw() {
-  const sx = shake ? rand(-shake, shake) : 0;
-  const sy = shake ? rand(-shake, shake) : 0;
+  const sx = shake ? Math.sin(shakePhase * 1.9) * shake : 0;
+  const sy = shake ? Math.cos(shakePhase * 2.3) * shake * 0.72 : 0;
   ctx.save();
   ctx.translate(sx, sy);
   drawCourt();
   drawPowerups();
   drawRacket(ai, "#71f6ff", "#0ff");
   drawRacket(player, bigTimer > 0 ? "#d9ff5a" : "#ff4f9e", bigTimer > 0 ? "#d9ff5a" : "#ff2f9c");
+  drawBallTrail();
   drawBall();
   drawParticles();
   drawHud();
@@ -441,6 +454,23 @@ function drawRacket(racket: typeof player | typeof ai, fill: string, glow: strin
   roundRect(-racket.w * 0.18, -racket.h * 0.5, racket.w * 0.36, racket.h, 4 * scale);
   ctx.fill();
   ctx.restore();
+}
+
+function drawBallTrail() {
+  if (ballTrail.length === 0) return;
+  ctx.save();
+  ctx.shadowColor = fireTimer > 0 ? "#ff4f9e" : "#71f6ff";
+  ctx.shadowBlur = 14 * scale;
+  for (const point of ballTrail) {
+    const alpha = Math.max(0, point.life / point.max) * 0.28;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = fireTimer > 0 ? "#ff4f9e" : "#d9ff5a";
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, point.radius * (0.55 + alpha), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
 }
 
 function drawBall() {
@@ -590,10 +620,20 @@ function line(x1: number, y1: number, x2: number, y2: number) {
   ctx.stroke();
 }
 
+const STEP = 1 / 120;
+let accumulator = 0;
+
 function loop(now: number) {
-  const dt = (now - last) / 1000;
+  const frameTime = Math.min((now - last) / 1000, 0.05);
   last = now;
-  update(dt);
+  accumulator += frameTime;
+  let steps = 0;
+  while (accumulator >= STEP && steps < 8) {
+    update(STEP);
+    accumulator -= STEP;
+    steps += 1;
+  }
+  if (steps === 8) accumulator = 0;
   draw();
   requestAnimationFrame(loop);
 }
